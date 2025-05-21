@@ -2,12 +2,13 @@ import base64
 from typing import List, Tuple
 
 class AES:
-	ROUND_CONSTANTS = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
 	ROUND_KEY_VARIANTS = {
 		128: 11,
 		192: 13,
 		256: 15
 	}
+
+	ROUND_CONSTANTS = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36)
 
 	S_BOX = (
 		0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
@@ -47,17 +48,19 @@ class AES:
 		0x17, 0x2B, 0x04, 0x7E, 0xBA, 0x77, 0xD6, 0x26, 0xE1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0C, 0x7D,
 	)
 
+	# row major
 	MIX_MATRIX = (
-		2, 3, 1, 1,
-		1, 2, 3, 1,
-		1, 1, 2, 3,
-		3, 1, 1, 2)
+		(2, 3, 1, 1),
+		(1, 2, 3, 1),
+		(1, 1, 2, 3),
+		(3, 1, 1, 2)
+	)
 
 	INV_MIX_MATRIX = (
-		14, 11, 13, 9,
-		9, 14, 11, 13,
-		13, 9, 14, 11,
-		11, 13, 9, 14
+		(14, 11, 13, 9),
+		(9, 14, 11, 13),
+		(13, 9, 14, 11),
+		(11, 13, 9, 14)
 	)
 
 	def __init__(self, key):
@@ -65,56 +68,51 @@ class AES:
 		self.num_rounds = len(self.key_schedule) - 1
 
 	@staticmethod
-	def expand_keys(key:bytes):
+	def expand_keys(key:bytes) -> List[List[List[int]]]:
+		'''Generate respective number of round keys from given key'''
 		# check valid key length
-		if isinstance(key, bytes):
-			key_len = len(key)*8
-		elif isinstance(key, str):
-			#TODO convert to ordinals and ints
-			pass
+		key_len = len(key)*8
 
 		try:
 			num_keys = AES.ROUND_KEY_VARIANTS[key_len]
 		except:
-			raise Exception(f'Key lengtj ({key_len}) not in {AES.ROUND_KEY_VARIANTS.keys()}')
+			raise Exception(f'Key length ({key_len}) not in {AES.ROUND_KEY_VARIANTS.keys()}')
 
 		# split key into 32-bit words
 		round_words = []
-		key_copy = int.from_bytes(key, byteorder='big')
+		for i in range(0, len(key), 4):
+			round_words.append(int.from_bytes(key[i:i+4], byteorder='big'))
 
-		while key_copy:
-			round_words.insert(0, key_copy & 0xFFFFFFFF)
-			key_copy >>= 32
 		num_initial_words = len(round_words)
 
 		# expand key words
-		for j in range(num_initial_words, 4*num_keys):
-			idk_key = round_words[j - num_initial_words]
-			idk_key2 = round_words[j - 1]
+		for round in range(num_initial_words, 4*num_keys):
+			prev_round_word = round_words[round - num_initial_words]
+			las_word = round_words[round - 1]
 
-			if j % num_initial_words == 0:
-				rcon_index = j // num_initial_words - 1
-				round_key = idk_key ^ AES.sub_word(AES.rot_word(idk_key2)) ^ AES.ROUND_CONSTANTS[rcon_index]
-			elif j % num_initial_words == 4:
-				round_key = idk_key ^ AES.sub_word(idk_key2)
+			if round % num_initial_words == 0:
+				rcon_index = round // num_initial_words - 1
+				rcon = AES.ROUND_CONSTANTS[rcon_index] << 24
+				round_key = prev_round_word ^ AES.sub_word(AES.rot_word(las_word)) ^ rcon
+			elif round % num_initial_words == 4:
+				round_key = prev_round_word ^ AES.sub_word(las_word)
 			else:
-				round_key = idk_key ^ idk_key2
+				round_key = prev_round_word ^ las_word
 			round_words.append(round_key)
 
-		# stitch each 4 words together to keys
-		# don't look to closely at this horrendous code
+		# stitch each 4 words into 4x4 matrix of 16 bytes
 		round_keys = []
 		for i in range(0, 4*num_keys, 4):
 			round_key = []
-			for j in range(3, -1, -1):
-				word = round_words[i+j]
-				for _ in range(4):
-					round_key.insert(0, word & 0xFF)
-					word >>= 8
+			for round in range(4):
+				word = round_words[i+round]
+				col = list(word.to_bytes(4, byteorder='big'))
+				round_key.append(col)
 			round_keys.append(round_key)
 		return round_keys
 
-	def encrypt_block(self, plain:bytes):
+	def encrypt_block(self, plain:bytes) -> bytes:
+		'''Encrypt a 16 byte plaintext block under the given key'''
 		entries = AES.split_message(plain)
 		AES.add_round_key(entries, self.key_schedule[0])
 
@@ -126,7 +124,8 @@ class AES:
 			AES.add_round_key(entries, self.key_schedule[i])
 		return AES.join_message(entries)
 
-	def decrypt_block(self, cipher:bytes):
+	def decrypt_block(self, cipher:bytes) -> bytes:
+		'''Decrypt a 16 byte cipher block under the given key'''
 		entries = AES.split_message(cipher)
 
 		for i in range(self.num_rounds-1, 0, -1):
@@ -140,27 +139,33 @@ class AES:
 		return AES.join_message(entries)
 
 	@staticmethod
-	def split_message(value:bytes):
-		# create column major 4x4 matrix of message of 16 bytes
-		if len(value) != 16:
-			raise Exception(f'Message length ({len(value)}) not equal 16 bytes.')
-		return [b for b in value]
+	def split_message(message:bytes) -> List[List[int]]:
+		'''Turn 16 byte message into a column major 4x4 matrix'''
+		if len(message) != 16:
+			raise Exception(f'Message length ({len(message)}) not equal 16 bytes.')
+		block = []
+		for i in range(0, 16, 4):
+			col = [b for b in message[i:i+4]]
+			block.append(col)
+		return block
 
 	@staticmethod
-	def join_message(values:List[int]):
+	def join_message(block:List[List[int]]) -> bytes:
+		'''Join 4x4 matrix back to on bytes message'''
 		message = b''
-		for val in values:
-			message += val.to_bytes(length=1, byteorder='big')
+		for col in block:
+			for val in col:
+				message += val.to_bytes(length=1, byteorder='big')
 		return message
 
 	@staticmethod
 	def rot_word(word:int):
-		# left circular shift the word by 1 byte
+		'''Left circular shifts the word by 1 byte'''
 		return (word & 0xFFFFFF) << 8 | (word & 0xFF000000) >> 24
 
 	@staticmethod
 	def sub_word(word:int):
-		# perform s box substitution on all 4 bytes
+		'''Performs S-box substitution on all 4 bytes'''
 		sub_0 = AES.S_BOX[word & 0xFF]
 		sub_1 = AES.S_BOX[word >> 8 & 0xFF] << 8
 		sub_2 = AES.S_BOX[word >> 16 & 0xFF] << 16
@@ -168,31 +173,35 @@ class AES:
 		return sub_0 | sub_1 | sub_2 | sub_3
 
 	@staticmethod
-	def sub_bytes(values:List[int], s_box:Tuple[int]):
-		for i in range(16):
-			values[i] = s_box[values[i]]
+	def sub_bytes(values:List[List[int]], s_box:Tuple[Tuple[int]]):
+		'''Substitutes each entry with the one from the S-box'''
+		for col in range(4):
+			for row in range(4):
+				values[col][row] = s_box[values[col][row]]
 
 	@staticmethod
-	def shift_rows(values:List[int], direction:int = 1):
-		#i really gotta use 2D lists
-		old_vals = values.copy()
+	def shift_rows(values:List[List[int]], direction:int = 1):
+		'''Applies left circular shift in each row by n columns, n being the index of the row'''
+		old_vals = [col[:] for col in values]
 		for row in range(1, 4):
 			offset = direction*row
 			for col in range(4):
-				values[4*col + row] = old_vals[4*((col + offset) % 4) + row]
+				values[col][row] = old_vals[(col + offset) % 4][row]
 
 	@staticmethod
-	def mix_col(values:List[int], matrix:Tuple[int]):
-		old_vals = values.copy()
+	def mix_col(values:List[List[int]], matrix:Tuple[int]):
+		'''Applies invertible matrix to each column in Galois Filed 2^8'''
+		old_vals = [col[:] for col in values]
 		for col in range(4):
 			for row in range(4):
 				new_val = 0
 				for i in range(4):
-					new_val ^= AES.gf8_multiply(matrix[4*row + i], old_vals[4*col + i])
-				values[4*col + row] = new_val
+					new_val ^= AES.gf8_multiply(matrix[row][i], old_vals[col][i])
+				values[col][row] = new_val
 
 	@staticmethod
-	def gf8_multiply(a:int, b:int):
+	def gf8_multiply(a:int, b:int) -> int:
+		'''Returns product of a and b in Galois Field GF(2^8)'''
 		result = 0
 		for _ in range(8):
 			# galois-add A to result, if the x^0 aka 1 position is present in B
@@ -208,19 +217,38 @@ class AES:
 		return result
 
 	@staticmethod
-	def add_round_key(values:List[int], round_key:List[int]):
-		for i in range(16):
-			values[i] ^= round_key[i]
+	def add_round_key(values:List[List[int]], round_key:List[List[int]]):
+		'''XOR each value with a round key value'''
+		for col in range(4):
+			for row in range(4):
+				values[col][row] ^= round_key[col][row]
 
 def main():
-	plain = b'Hdyd fellow kids'
-	key = bytes.fromhex('00010203040506070809000102030405')
+	print("AES Demonstration")
+	# Example 1: Basic single block
+	plain = b'cryptography yea' # 16 bytes
+	key = bytes.fromhex('000102030405060708090A0B0C0D0E0F')
+	print(f"Plaintext: {plain}\n")
+	print(f"Key: {key.hex()}")
 
 	aes = AES(key)
-	result = aes.encrypt_block(plain)
-	print(base64.b64encode(result))
-	result = aes.decrypt_block(result)
-	print(result)
+	cipher = aes.encrypt_block(plain)
+	print(f"Encrypted (Base64): {base64.b64encode(cipher).decode()}")
+
+	decrypted = aes.decrypt_block(cipher)
+	print(f"Decrypted: {decrypted}\n")
+
+	# Example 2: Different key size
+	key256 = bytes.fromhex('000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F')
+	print(f"Key: {key256.hex()}")
+
+	aes256 = AES(key256)
+	cipher = aes256.encrypt_block(plain)
+	print(f"Encrypted (Base64): {base64.b64encode(cipher).decode()}")
+
+	decrypted = aes256.decrypt_block(cipher)
+	print(f"Decrypted: {decrypted}\n")
+
 
 if __name__ == '__main__':
 	main()
